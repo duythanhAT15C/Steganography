@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Giấu tin văn bản trong ảnh (LSB Steganography)</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        background: #f8f9fa;
+      }
+      .image-box {
+        border: 1px solid #dee2e6;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        background: #fff;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        min-height: 420px;
+      }
+      .image-box label {
+        font-weight: 600;
+      }
+      canvas {
+        width: 100%;
+        max-height: 300px;
+        border: 1px dashed #ccc;
+        border-radius: 0.5rem;
+        background: #f8f9fa;
+        object-fit: contain;
+      }
+      textarea {
+        resize: vertical;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+    </style>
+  </head>
+
+  <body class="bg-light py-4">
+    <div class="container">
+      <h1 class="mb-4 text-center text-primary">
+        Giấu văn bản trong ảnh (LSB Steganography)
+      </h1>
+
+      <div class="row g-4">
+        <!-- Ảnh nguồn -->
+        <div class="col-md-6">
+          <div class="image-box">
+            <label>Ảnh nguồn (PNG/JPEG)</label>
+            <canvas id="canvasSrc" class="w-100 mb-3"></canvas>
+            <input
+              id="file"
+              type="file"
+              accept="image/*"
+              class="form-control"
+            />
+          </div>
+        </div>
+
+        <!-- Ảnh kết quả -->
+        <div class="col-md-6">
+          <div class="image-box">
+            <label>Ảnh đã giấu tin</label>
+            <canvas id="canvasOut" class="w-100 mb-3"></canvas>
+            <div class="row g-2">
+              <div class="col-6">
+                <button id="download" class="btn btn-success w-100" disabled>
+                  ⬇️ Tải ảnh
+                </button>
+              </div>
+              <div class="col-6">
+                <button id="share" class="btn btn-info w-100" disabled>
+                  📤 Chia sẻ ảnh
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <hr class="my-4" />
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Nội dung cần giấu</label>
+        <textarea
+          id="message"
+          class="form-control"
+          rows="4"
+          placeholder="Nhập chuỗi văn bản..."
+        ></textarea>
+      </div>
+
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Mật khẩu (tuỳ chọn)</label>
+          <input
+            id="password"
+            type="password"
+            class="form-control"
+            placeholder="Mã hoá AES-GCM trước khi giấu"
+            value="Thanhpro@342000c"
+            disabled
+          />
+        </div>
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Tiền tố nhận diện</label>
+          <input
+            id="magic"
+            type="text"
+            class="form-control"
+            value="STEGv1"
+            disabled
+          />
+          <div class="form-text">Dùng để đánh dấu, giúp giải mã đúng ảnh.</div>
+        </div>
+      </div>
+
+      <div class="row mt-3 g-3">
+        <div class="col-md-6">
+          <button id="encode" class="btn btn-primary w-100">
+            Giấu văn bản (Encode)
+          </button>
+        </div>
+        <div class="col-md-6">
+          <button id="decode" class="btn btn-secondary w-100">
+            Giải trích văn bản (Decode)
+          </button>
+        </div>
+      </div>
+
+      <hr class="my-4" />
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Kết quả giải trích</label>
+        <textarea
+          id="decoded"
+          class="form-control mono"
+          rows="4"
+          readonly
+        ></textarea>
+      </div>
+
+      <div class="alert alert-warning small mt-4">
+        <strong>Lưu ý:</strong>
+        <ul class="mb-0">
+          <li>Ảnh PNG giữ dữ liệu tốt hơn JPEG.</li>
+          <li>
+            Dung lượng chứa xấp xỉ:
+            <code>số_pixel * 3 bit</code> (1 bit mỗi kênh R,G,B).
+          </li>
+          <li>Nên dùng mật khẩu để mã hoá nội dung trước khi giấu.</li>
+        </ul>
+      </div>
+    </div>
+
+    <script>
+      /* --- Crypto --- */
+      async function deriveKeyFromPassword(password, salt) {
+        const enc = new TextEncoder();
+        const keyMaterial = await crypto.subtle.importKey(
+          "raw",
+          enc.encode(password),
+          { name: "PBKDF2" },
+          false,
+          ["deriveKey"]
+        );
+        return crypto.subtle.deriveKey(
+          { name: "PBKDF2", salt, iterations: 120000, hash: "SHA-256" },
+          keyMaterial,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["encrypt", "decrypt"]
+        );
+      }
+
+      async function encryptString(str, password) {
+        const enc = new TextEncoder();
+        const data = enc.encode(str);
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const key = await deriveKeyFromPassword(password, salt);
+        const ct = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv },
+          key,
+          data
+        );
+        return { salt, iv, ciphertext: new Uint8Array(ct) };
+      }
+
+      async function decryptToString(payload, password) {
+        const { salt, iv, ciphertext } = payload;
+        const key = await deriveKeyFromPassword(password, salt);
+        const ptBuf = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          key,
+          ciphertext
+        );
+        return new TextDecoder().decode(ptBuf);
+      }
+
+      /* --- Bit helpers --- */
+      function bytesToBits(bytes) {
+        const bits = [];
+        for (let i = 0; i < bytes.length; i++)
+          for (let b = 7; b >= 0; b--) bits.push((bytes[i] >> b) & 1);
+        return bits;
+      }
+      function bitsToBytes(bits) {
+        const out = new Uint8Array(Math.ceil(bits.length / 8));
+        for (let i = 0; i < out.length; i++) {
+          let byte = 0;
+          for (let b = 0; b < 8; b++) {
+            const bit = bits[i * 8 + b] ?? 0;
+            byte = (byte << 1) | bit;
+          }
+          out[i] = byte;
+        }
+        return out;
+      }
+
+      /* --- Payload --- */
+      function buildPayload({ magicBytes, encrypted, salt, iv, dataBytes }) {
+        const headerLen = magicBytes.length + 1 + (encrypted ? 16 + 12 : 0) + 4;
+        const buf = new Uint8Array(headerLen + dataBytes.length);
+        let o = 0;
+        buf.set(magicBytes, o);
+        o += magicBytes.length;
+        buf[o++] = encrypted ? 1 : 0;
+        if (encrypted) {
+          buf.set(salt, o);
+          o += 16;
+          buf.set(iv, o);
+          o += 12;
+        }
+        const len = dataBytes.length >>> 0;
+        buf[o++] = (len >>> 24) & 0xff;
+        buf[o++] = (len >>> 16) & 0xff;
+        buf[o++] = (len >>> 8) & 0xff;
+        buf[o++] = len & 0xff;
+        buf.set(dataBytes, o);
+        return buf;
+      }
+
+      function parsePayload(buf, magicBytes) {
+        let o = 0;
+        for (let i = 0; i < magicBytes.length; i++)
+          if (buf[o + i] !== magicBytes[i])
+            throw new Error("Không tìm thấy magic prefix.");
+        o += magicBytes.length;
+        const encrypted = buf[o++] === 1;
+        let salt = null,
+          iv = null;
+        if (encrypted) {
+          salt = buf.slice(o, o + 16);
+          o += 16;
+          iv = buf.slice(o, o + 12);
+          o += 12;
+        }
+        const len =
+          ((buf[o++] << 24) | (buf[o++] << 16) | (buf[o++] << 8) | buf[o++]) >>>
+          0;
+        const data = buf.slice(o, o + len);
+        return { encrypted, salt, iv, data };
+      }
+
+      /* --- LSB --- */
+      function encodeLSBIntoImageData(imageData, payloadBytes) {
+        const bits = bytesToBits(payloadBytes);
+        const pixels = imageData.data;
+        const capacity = Math.floor(pixels.length / 4) * 3;
+        if (bits.length > capacity)
+          throw new Error(
+            `Vượt dung lượng: cần ${bits.length} bit, ảnh chứa tối đa ${capacity} bit.`
+          );
+        let bi = 0;
+        for (let i = 0; i < pixels.length && bi < bits.length; i += 4) {
+          pixels[i] = (pixels[i] & 0xfe) | bits[bi++];
+          if (bi < bits.length)
+            pixels[i + 1] = (pixels[i + 1] & 0xfe) | bits[bi++];
+          if (bi < bits.length)
+            pixels[i + 2] = (pixels[i + 2] & 0xfe) | bits[bi++];
+        }
+        return { imageData, usedBits: bits.length };
+      }
+
+      function decodeLSBFromImageData(imageData, totalBitsToRead) {
+        const pixels = imageData.data;
+        const bits = [];
+        for (
+          let i = 0;
+          i < pixels.length && bits.length < totalBitsToRead;
+          i += 4
+        ) {
+          bits.push(pixels[i] & 1);
+          bits.push(pixels[i + 1] & 1);
+          bits.push(pixels[i + 2] & 1);
+        }
+        return bits;
+      }
+
+      function extractPayload(imageData, magicBytes) {
+        const pixels = imageData.data;
+        const totalBits = Math.floor(pixels.length / 4) * 3;
+        const bits = decodeLSBFromImageData(imageData, totalBits);
+        const bytes = bitsToBytes(bits);
+        for (let i = 0; i < magicBytes.length; i++)
+          if (bytes[i] !== magicBytes[i]) throw new Error("Không thấy magic.");
+        let o = magicBytes.length;
+        const encrypted = bytes[o++] === 1;
+        const headerExtra = encrypted ? 16 + 12 : 0;
+        const len =
+          ((bytes[o] << 24) |
+            (bytes[o + 1] << 16) |
+            (bytes[o + 2] << 8) |
+            bytes[o + 3]) >>>
+          0;
+        const totalLen = magicBytes.length + 1 + headerExtra + 4 + len;
+        return bytes.slice(0, totalLen);
+      }
+
+      function hasStegoInImageData(imageData, magicBytes) {
+        const bitsNeeded = magicBytes.length * 8;
+        const bits = decodeLSBFromImageData(imageData, bitsNeeded);
+        const bytes = bitsToBytes(bits);
+        if (bytes.length < magicBytes.length) return false;
+        for (let i = 0; i < magicBytes.length; i++) {
+          if (bytes[i] !== magicBytes[i]) return false;
+        }
+        return true;
+      }
+
+      /* --- UI --- */
+      const fileEl = document.getElementById("file");
+      const canvasSrc = document.getElementById("canvasSrc");
+      const canvasOut = document.getElementById("canvasOut");
+      const ctxSrc = canvasSrc.getContext("2d");
+      const ctxOut = canvasOut.getContext("2d");
+      const msgEl = document.getElementById("message");
+      const passEl = document.getElementById("password");
+      const magicEl = document.getElementById("magic");
+      const decodedEl = document.getElementById("decoded");
+      const btnEncode = document.getElementById("encode");
+      const btnDecode = document.getElementById("decode");
+      const btnDownload = document.getElementById("download");
+      const btnShare = document.getElementById("share");
+
+      let img = null;
+      btnDownload.disabled = true;
+      btnShare.disabled = true;
+
+      function drawImageToCanvas(cv, image) {
+        cv.width = image.naturalWidth || image.width;
+        cv.height = image.naturalHeight || image.height;
+        const ctx = cv.getContext("2d");
+        ctx.clearRect(0, 0, cv.width, cv.height);
+        ctx.drawImage(image, 0, 0, cv.width, cv.height);
+      }
+
+      function loadImage(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const image = new Image();
+            image.onload = () => resolve(image);
+            image.onerror = reject;
+            image.src = reader.result;
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
+
+      fileEl.addEventListener("change", async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        img = await loadImage(f);
+        drawImageToCanvas(canvasSrc, img);
+        btnDownload.disabled = true;
+        btnShare.disabled = true;
+        canvasSrc.style.visibility = "visible";
+        canvasOut.style.visibility = "hidden";
+      });
+
+      btnEncode.addEventListener("click", async () => {
+        if (!img) return alert("Hãy chọn ảnh trước.");
+        const text = msgEl.value.trim();
+        if (!text) return alert("Nhập nội dung cần giấu.");
+        const magicBytes = new TextEncoder().encode(magicEl.value || "STEGv1");
+        const srcImageData = ctxSrc.getImageData(
+          0,
+          0,
+          canvasSrc.width,
+          canvasSrc.height
+        );
+        if (hasStegoInImageData(srcImageData, magicBytes)) {
+          alert("Ảnh nguồn đã chứa dữ liệu giấu tin. Không được giấu thêm.");
+          return;
+        }
+
+        let encrypted = false,
+          salt = null,
+          iv = null,
+          dataBytes = null;
+        if (passEl.value) {
+          encrypted = true;
+          const enc = await encryptString(text, passEl.value);
+          salt = enc.salt;
+          iv = enc.iv;
+          dataBytes = enc.ciphertext;
+        } else dataBytes = new TextEncoder().encode(text);
+
+        const payload = buildPayload({
+          magicBytes,
+          encrypted,
+          salt,
+          iv,
+          dataBytes,
+        });
+        drawImageToCanvas(canvasOut, img);
+        const imageData = ctxOut.getImageData(
+          0,
+          0,
+          canvasOut.width,
+          canvasOut.height
+        );
+        const { imageData: encoded } = encodeLSBIntoImageData(
+          imageData,
+          payload
+        );
+        ctxOut.putImageData(encoded, 0, 0);
+
+        btnDownload.disabled = false;
+        btnShare.disabled = false;
+        fileEl.value = "";
+        alert("✅ Đã giấu tin thành công!");
+        ctxSrc.clearRect(0, 0, canvasSrc.width, canvasSrc.height);
+        canvasOut.style.visibility = "visible";
+      });
+
+      async function decodeFromCanvas(ctx, canvas, magicBytes, password) {
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const payloadBytes = extractPayload(imageData, magicBytes);
+        const parsed = parsePayload(payloadBytes, magicBytes);
+        if (parsed.encrypted) {
+          if (!password) return "[Ảnh có dữ liệu mã hoá — cần mật khẩu]";
+          try {
+            return await decryptToString(
+              { salt: parsed.salt, iv: parsed.iv, ciphertext: parsed.data },
+              password
+            );
+          } catch {
+            return "[Sai mật khẩu hoặc dữ liệu hỏng]";
+          }
+        } else return new TextDecoder().decode(parsed.data);
+      }
+
+      btnDecode.addEventListener("click", async () => {
+        const magicBytes = new TextEncoder().encode(magicEl.value || "STEGv1");
+        decodedEl.value = "";
+        try {
+          decodedEl.value = await decodeFromCanvas(
+            ctxOut,
+            canvasOut,
+            magicBytes,
+            passEl.value
+          );
+        } catch {
+          decodedEl.value = "[Lỗi] Không tìm thấy dữ liệu.";
+        }
+      });
+
+      btnDownload.addEventListener("click", () => {
+        const url = canvasOut.toDataURL("image/png");
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "stego.png";
+
+        // Kiểm tra thiết bị di động (iOS/Android)
+        const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+        if (isMobile) {
+          // 1. Trên điện thoại, mở ảnh trong tab mới
+          window.open(url, "_blank");
+
+          // 2. Thông báo hướng dẫn người dùng
+          alert(
+            "✅ Ảnh đã mở trong tab mới. Vui lòng NHẤN GIỮ (long-press) vào ảnh để LƯU (SAVE) hoặc CHIA SẺ trực tiếp."
+          );
+        } else {
+          // 3. Trên máy tính/desktop, tự động tải xuống
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+      });
+
+      /* ✅ Nút chia sẻ ảnh */
+      btnShare.addEventListener("click", async () => {
+        try {
+          const blob = await new Promise((resolve) =>
+            canvasOut.toBlob(resolve, "image/png")
+          );
+
+          if (!blob) throw new Error("Không tạo được blob từ canvas");
+
+          const file = new File([blob], "stego.png", { type: "image/png" });
+
+          // Cố gắng sử dụng Web Share API
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            await navigator.share({
+              title: "Ảnh giấu tin",
+              text: "Chia sẻ ảnh đã giấu tin (LSB Steganography)",
+              files: [file],
+            });
+            return; // Thành công thì thoát
+          }
+
+          // Nếu Web Share API không hỗ trợ hoặc thất bại: Fallback
+          const url = URL.createObjectURL(blob);
+          window.open(url, "_blank");
+          alert(
+            "⚠️ Chia sẻ trực tiếp không khả dụng. Ảnh đã được mở trong tab mới, bạn có thể NHẤN GIỮ vào ảnh để lưu hoặc chia sẻ thủ công."
+          );
+        } catch (err) {
+          console.error("Lỗi chia sẻ:", err);
+          // Fallback cuối cùng nếu lỗi: mở ảnh trong tab mới
+          const url = canvasOut.toDataURL("image/png");
+          window.open(url, "_blank");
+          alert(
+            "❌ Lỗi xảy ra. Ảnh đã được mở trong tab mới, bạn có thể lưu/chia sẻ thủ công."
+          );
+        }
+      });
+    </script>
+  </body>
+</html>
